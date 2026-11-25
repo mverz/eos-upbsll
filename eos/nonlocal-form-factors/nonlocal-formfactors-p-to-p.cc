@@ -24,6 +24,7 @@
 #include <eos/maths/power-of.hh>
 #include <eos/models/model.hh>
 #include <eos/nonlocal-form-factors/nonlocal-formfactors.hh>
+#include <eos/utils/exception.hh>
 #include <eos/utils/options-impl.hh>
 #include <eos/utils/private_implementation_pattern-impl.hh>
 #include <eos/utils/stringify.hh>
@@ -1492,10 +1493,16 @@ namespace eos
                                eos::nff_utils::z(-3.0, s_G(), t_0()),
                                eos::nff_utils::z(-1.0, s_G(), t_0()),
                                0.0, // z(t_0) = 0.0 by construction
-                               eos::nff_utils::z(power_of<2>(m_Jpsi), s_G(), t_0()) }),
+                               // node at the complex J/psi pole, so that the J/psi residue depends only on the J/psi parameters
+                               eos::nff_utils::z(power_of<2>(m_Gamma[0]), s_G(), t_0()) }),
 
                     orthonormal_polynomials(SzegoPolynomial<interpolation_order>::FlatMeasure(M_PI))
                 {
+                    if (power_of<2>(m_Jpsi()) >= s_G())
+                    {
+                        throw InternalError("GRV2026: the J/psi must lie below the threshold t_V");
+                    }
+
                     this->uses(*form_factors);
                 }
 
@@ -1607,45 +1614,36 @@ namespace eos
                     return complex<double>(gsl_vector_get(coefficients.first, i), gsl_vector_get(coefficients.second, i));
                 }
 
-                // Residue of H at s = m_Jpsi2 computed as the residue wrt z -z_Jpsi divided by dz/ds evaluated at s = m_Jpsi2
                 inline complex<double>
-                H_residue_jpsi(const std::array<unsigned, 6> & phi_parameters, const std::vector<double> & Mres,
-                               const std::array<complex<double>, interpolation_order + 1> & interpolation_values) const
+                H_blaschke_residue(const complex<double> & m_pole, const std::array<unsigned, 6> & phi_parameters, const std::vector<double> & Mres,
+                                   const std::array<complex<double>, interpolation_order + 1> & interpolation_values) const
                 {
-                    const complex<double> m_Jpsi2  = power_of<2>(m_Jpsi() - 0.5 * complex<double>(0, 1) * decay_w_Jpsi);
-                    const double          m_psi2S2 = power_of<2>(m_psi2S);
+                    const complex<double> s_k = power_of<2>(m_pole);
 
-                    const double s_0     = this->t_0();
-                    const double sG      = this->s_G();
-                    const auto   z_Jpsi  = eos::nff_utils::z(m_Jpsi2, sG, s_0);
-                    const auto   z_psi2S = eos::nff_utils::z(m_psi2S2, sG, s_0);
+                    const double s_0 = this->t_0();
+                    const double sG  = this->s_G();
+                    const auto   z_k = eos::nff_utils::z(s_k, sG, s_0);
 
-                    const complex<double> p_at_z = lagrange(interpolation_values, z_Jpsi);
+                    bool            is_pole             = false;
+                    complex<double> blaschke_derivative = 1.0 / (1.0 - norm(z_k));
+                    for (const auto & z_j : z_poles)
+                    {
+                        if (z_j == z_k)
+                        {
+                            is_pole = true;
+                            continue;
+                        }
+                        blaschke_derivative *= (z_k - z_j) / (1.0 - z_k * std::conj(z_j));
+                    }
 
-                    const complex<double> dzds = -pow(sG - s_0, 0.5) * pow(sG - m_Jpsi2, -0.5) * pow(pow(sG - m_Jpsi2, 0.5) + pow(sG - s_0, 0.5), -2);
+                    if (! is_pole)
+                    {
+                        throw InternalError("GRV2026: residue requested for a resonance that is not a pole of the Blaschke factor (above the threshold t_V)");
+                    }
 
+                    const complex<double> dzds = -pow(sG - s_0, 0.5) * pow(sG - s_k, -0.5) * pow(pow(sG - s_k, 0.5) + pow(sG - s_0, 0.5), -2);
 
-                    return p_at_z / phi(m_Jpsi2, phi_parameters, Mres) * (1 - norm(z_Jpsi)) * (1. - z_Jpsi * std::conj(z_psi2S)) / (z_Jpsi - z_psi2S) / dzds;
-                }
-
-                // Residue of H at s = m_psi2S2 computed as the residue wrt z -z_psi2S divided by dz/ds evaluated at s = m_psi2S2
-                inline complex<double>
-                H_residue_psi2s(const std::array<unsigned, 6> & phi_parameters, const std::vector<double> & Mres,
-                                const std::array<complex<double>, interpolation_order + 1> & interpolation_values) const
-                {
-                    const complex<double> m_Jpsi2  = power_of<2>(m_Jpsi() - 0.5 * complex<double>(0, 1) * decay_w_Jpsi);
-                    const double          m_psi2S2 = power_of<2>(m_psi2S);
-
-                    const double s_0     = this->t_0();
-                    const double sG      = this->s_G();
-                    const auto   z_Jpsi  = eos::nff_utils::z(m_Jpsi2, sG, s_0);
-                    const auto   z_psi2S = eos::nff_utils::z(m_psi2S2, sG, s_0);
-
-                    const complex<double> p_at_z = lagrange(interpolation_values, z_psi2S);
-
-                    const complex<double> dzds = -pow(sG - s_0, 0.5) * pow(sG - m_psi2S2, -0.5) * pow(pow(sG - m_psi2S2, 0.5) + pow(sG - s_0, 0.5), -2);
-
-                    return p_at_z / phi(m_psi2S2, phi_parameters, Mres) * (1 - norm(z_psi2S)) * (1. - z_psi2S * std::conj(z_Jpsi)) / (z_psi2S - z_Jpsi) / dzds;
+                    return lagrange(interpolation_values, z_k) / phi(s_k, phi_parameters, Mres) / blaschke_derivative / dzds;
                 }
 
                 virtual complex<double>
@@ -1704,7 +1702,7 @@ namespace eos
                     const std::array<unsigned, 6> phi_parameters = { 3, 3, 4, 3, 1, 4 };
                     const std::vector<double>     Mres           = m_res;
 
-                    return H_residue_jpsi(phi_parameters, Mres, interpolation_values);
+                    return H_blaschke_residue(m_Gamma[0], phi_parameters, Mres, interpolation_values);
                 }
 
                 virtual complex<double>
@@ -1719,7 +1717,7 @@ namespace eos
                     const std::array<unsigned, 6> phi_parameters = { 3, 3, 4, 3, 1, 4 };
                     const std::vector<double>     Mres           = m_res;
 
-                    return H_residue_psi2s(phi_parameters, Mres, interpolation_values);
+                    return H_blaschke_residue(m_Gamma[1], phi_parameters, Mres, interpolation_values);
                 }
 
                 virtual complex<double>
